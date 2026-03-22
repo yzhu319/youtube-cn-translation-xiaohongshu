@@ -2,10 +2,12 @@
 import os
 import shutil
 from pathlib import Path
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-# Load .env file
-load_dotenv()
+# Load .env — searches up the directory tree, so a shared .env at
+# ~/src/github.com/yzhu319/.env works for all projects under yzhu319/
+# A local .env in the project root takes precedence if it exists.
+load_dotenv(find_dotenv(usecwd=True))
 
 # API Keys
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")

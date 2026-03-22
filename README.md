@@ -56,10 +56,15 @@ pip install -r requirements.txt
 
 ### Configure API key
 
-Create a `.env` file in the project root:
+The app searches up the directory tree for a `.env` file, so you can share one
+across all projects under `~/src/github.com/yzhu319/`:
 
-```
-OPENAI_API_KEY=sk-...
+```bash
+# Shared key for all personal projects (recommended)
+echo "OPENAI_API_KEY=sk-..." > ~/src/github.com/yzhu319/.env
+
+# Or project-local (takes precedence over shared)
+echo "OPENAI_API_KEY=sk-..." > .env
 ```
 
 ### (Optional) Override defaults via `.env`
