@@ -1,12 +1,9 @@
 """Core modules for xiaohongshu video pipeline."""
-from .downloader import download_video, DownloadResult
-from .translator import translate_subtitles, TranslationResult
+from .downloader import download_video, DownloadResult, extract_video_id, find_existing_project
+from .translator import translate_subtitles, TranslationResult, compute_optimal_batch_size
 from .subtitles import (
     SubtitleEntry, parse_srt, write_srt, srt_to_vtt,
     extract_chinese_srt, has_chinese, validate_translations,
     fix_overlapping_subtitles
 )
-from .burner import (
-    burn_subtitles, burn_subtitles_async, get_burn_status,
-    BurnConfig, BurnResult
-)
+from .burner import burn_subtitles, BurnConfig, BurnResult

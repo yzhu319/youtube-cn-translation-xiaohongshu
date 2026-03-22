@@ -2,19 +2,16 @@
 import streamlit as st
 import time
 import base64
-import uuid
 import json
 from pathlib import Path
 
-from config import (
-    DATA_DIR, DEFAULT_FONT_SIZE, DEFAULT_MARGIN_V,
-    DEFAULT_BATCH_SIZE, DEFAULT_CONTEXT_SIZE
-)
+from config import DATA_DIR, DEFAULT_FONT
 from core import (
     download_video, translate_subtitles, parse_srt, write_srt,
-    srt_to_vtt, burn_subtitles_async, get_burn_status, BurnConfig,
-    fix_overlapping_subtitles
+    srt_to_vtt, BurnConfig, fix_overlapping_subtitles,
+    compute_optimal_batch_size, extract_video_id, find_existing_project,
 )
+from core.burner import burn_subtitles
 
 st.set_page_config(
     page_title="YouTube to Xiaohongshu",
@@ -35,8 +32,8 @@ if "translated" not in st.session_state:
     st.session_state.translated = False
 if "vtt_path" not in st.session_state:
     st.session_state.vtt_path = None
-if "burn_job_id" not in st.session_state:
-    st.session_state.burn_job_id = None
+if "burn_running" not in st.session_state:
+    st.session_state.burn_running = False
 if "project_dir" not in st.session_state:
     st.session_state.project_dir = None
 if "cn_srt_path" not in st.session_state:
@@ -51,7 +48,7 @@ def reset_state():
     st.session_state.entries = None
     st.session_state.translated = False
     st.session_state.vtt_path = None
-    st.session_state.burn_job_id = None
+    st.session_state.burn_running = False
     st.session_state.project_dir = None
     st.session_state.cn_srt_path = None
 
@@ -215,29 +212,25 @@ if st.session_state.step == "input":
         key="url_input"
     )
 
-    output_name = st.text_input(
-        "Output Name (optional)",
-        placeholder="Leave blank for auto-generated name",
-        key="output_name"
-    )
+    # Auto-detect existing project by video ID
+    existing_project = None
+    if url:
+        vid = extract_video_id(url)
+        if vid:
+            existing_project = find_existing_project(vid)
 
-    # Check if download already exists
-    existing_download = None
-    if output_name:
-        check_dir = DATA_DIR / output_name
-        video_file = check_dir / "video.mp4"
-        srt_file = check_dir / "video.en.srt"
-        if video_file.exists() and srt_file.exists():
-            existing_download = (video_file, srt_file, check_dir)
+    if existing_project:
+        st.success(f"Existing project found: `{existing_project.name}`")
+        srt_file = existing_project / "video.en.srt"
+        if not srt_file.exists():
+            srt_file = next(existing_project.glob("video*.srt"), None)
 
-    if existing_download:
-        st.success(f"Existing download found in `{output_name}/`")
         col_use, col_redownload = st.columns(2)
         with col_use:
             if st.button("Use Existing Download", type="primary", use_container_width=True):
-                st.session_state.video_path = existing_download[0]
-                st.session_state.srt_path = existing_download[1]
-                st.session_state.project_dir = existing_download[2]
+                st.session_state.video_path = existing_project / "video.mp4"
+                st.session_state.srt_path = srt_file
+                st.session_state.project_dir = existing_project
                 st.session_state.step = "translate"
                 st.rerun()
         with col_redownload:
@@ -246,15 +239,15 @@ if st.session_state.step == "input":
         do_download = st.button("Download Video", type="primary", disabled=not url)
 
     if do_download and url:
-        with st.spinner("Downloading video and subtitles..."):
-            result = download_video(url, output_name or None)
+        with st.spinner("Fetching video metadata and downloading..."):
+            result = download_video(url)
 
             if result.success:
                 st.session_state.video_path = result.video_path
                 st.session_state.srt_path = result.srt_path
                 st.session_state.project_dir = result.video_path.parent
                 st.session_state.step = "translate"
-                st.success(f"Downloaded: {result.title or 'Video'}")
+                st.success(f"Downloaded: {result.title or 'Video'} → `{result.project_name}`")
                 st.rerun()
             else:
                 st.error(f"Download failed: {result.error}")
@@ -303,11 +296,27 @@ elif st.session_state.step == "translate":
     else:
         redo_translation = True  # No existing translation, must translate
 
-    # Translation info
+    # Auto-compute and display translation strategy
+    auto_batch_size, strategy_desc = compute_optimal_batch_size(st.session_state.entries)
     num_lines = len(st.session_state.entries)
-    num_chunks = (num_lines + 19) // 20  # 20 lines per chunk
+    est_chunks = (num_lines + auto_batch_size - 1) // auto_batch_size
 
-    st.caption(f"Will analyze transcript, then translate in {num_chunks} chunks of ~20 lines each")
+    st.info(
+        f"**Auto strategy:** {strategy_desc}  \n"
+        f"~{est_chunks} API calls · semantic boundary splitting enabled"
+    )
+
+    with st.expander("Advanced: override batch size"):
+        manual_batch = st.slider(
+            "Lines per batch (0 = auto)",
+            min_value=0, max_value=50,
+            value=0,
+            help="0 uses the auto-computed size above. Increase for faster/cheaper; decrease for more reliable parsing."
+        )
+        if manual_batch > 0:
+            override_chunks = (num_lines + manual_batch - 1) // manual_batch
+            st.caption(f"Manual: {manual_batch} lines/batch → ~{override_chunks} API calls")
+    batch_size_to_use = manual_batch if manual_batch > 0 else None
 
     # Show sample with timestamps
     with st.expander("Preview Original Subtitles (first 10)"):
@@ -331,11 +340,17 @@ elif st.session_state.step == "translate":
         result = translate_subtitles(
             st.session_state.entries,
             progress_callback=update_progress,
+            batch_size=batch_size_to_use,
         )
 
         if result.success:
             st.session_state.entries = result.entries
             st.session_state.translated = True
+            if result.strategy_description:
+                status_text.text(
+                    f"Translation complete! "
+                    f"({result.num_chunks} chunks, {result.chunk_size_used} lines/batch — {result.strategy_description})"
+                )
 
             # Fix overlapping timestamps (common in YouTube auto-captions)
             st.session_state.entries = fix_overlapping_subtitles(st.session_state.entries)
@@ -375,10 +390,10 @@ elif st.session_state.step == "preview":
         st.caption("Changes apply instantly to preview")
 
         st.subheader("Font")
-        font_size = st.slider("Font Size (px)", 16, 48, 28, key="font_size")
+        font_size = st.slider("Font Size (px)", 16, 48, 21, key="font_size")
         font_family = st.selectbox(
             "Font Family",
-            ["PingFang SC", "Heiti SC", "STHeiti", "Microsoft YaHei", "SimHei"],
+            ["Heiti SC", "Hiragino Sans GB", "STHeiti", "PingFang SC", "SimHei"],
             key="font_family"
         )
         font_color = st.color_picker("Font Color", "#FFFFFF", key="font_color")
@@ -386,7 +401,7 @@ elif st.session_state.step == "preview":
         st.subheader("Position & Style")
         position_bottom = st.slider("Position from Bottom (%)", 5, 40, 12, key="position")
         outline_size = st.slider("Outline Size (px)", 0, 5, 2, key="outline")
-        bg_opacity = st.slider("Background Opacity (%)", 0, 100, 60, key="bg_opacity")
+        bg_opacity = st.slider("Background Opacity (%)", 0, 100, 20, key="bg_opacity")
 
         st.divider()
         if st.button("Start New Video", use_container_width=True):
@@ -427,13 +442,14 @@ elif st.session_state.step == "preview":
 
     with col2:
         if st.button("Proceed to Burn Subtitles", type="primary", use_container_width=True):
-            # Store current settings for burn
-            # Scale font size: CSS px to ASS (ASS uses ~1.5x for similar visual at 1080p)
-            # Scale position: CSS bottom % to ASS MarginV (rough: % * 5-6 for 1080p)
+            # Store preview settings as-is; burner converts them using actual video dimensions
             st.session_state.burn_settings = {
-                "font_size": int(font_size * 0.9),  # ASS font slightly smaller for same look
-                "margin_v": int(position_bottom * 5.5),  # Convert % to ASS margin pixels
+                "font_size": font_size,
+                "position_bottom_pct": float(position_bottom),
                 "outline": outline_size,
+                "font_color_hex": font_color,
+                "bg_opacity": bg_opacity,
+                "font_family": font_family,
             }
             st.session_state.step = "burn"
             st.rerun()
@@ -444,18 +460,17 @@ elif st.session_state.step == "burn":
 
     # Get settings from preview or use defaults
     burn_settings = st.session_state.get("burn_settings", {
-        "font_size": DEFAULT_FONT_SIZE,
-        "margin_v": DEFAULT_MARGIN_V,
+        "font_size": 21,
+        "position_bottom_pct": 12.0,
         "outline": 2,
+        "font_color_hex": "#FFFFFF",
+        "bg_opacity": 20,
+        "font_family": DEFAULT_FONT,
     })
 
-    st.info(
-        "This process encodes the subtitles permanently into the video. "
-        "This takes a few minutes depending on video length."
-    )
-
-    # Output path
-    output_path = st.session_state.project_dir / "output_xiaohongshu.mp4"
+    # Output path — named from project folder with -CN suffix
+    project_name = st.session_state.project_dir.name
+    output_path = st.session_state.project_dir / f"{project_name} - CN.mp4"
 
     # Use stored cn_srt_path or construct it
     if hasattr(st.session_state, 'cn_srt_path') and st.session_state.cn_srt_path:
@@ -471,74 +486,79 @@ elif st.session_state.step == "burn":
         st.write(f"**Subtitles:** {cn_srt.name}")
     with col2:
         st.write(f"**Output:** {output_path.name}")
-        st.write(f"**Font Size:** {burn_settings['font_size']}px")
-        st.write(f"**Margin:** {burn_settings['margin_v']}")
+        st.write(f"**Font:** {burn_settings['font_size']}px · {burn_settings.get('font_color_hex', '#FFF')} · bg {burn_settings.get('bg_opacity', 20)}%")
+        st.write(f"**Position:** {burn_settings.get('position_bottom_pct', 12)}% from bottom")
 
-    # Sidebar minimal during burn
     with st.sidebar:
-        st.header("Burning...")
+        st.header("Burn Settings")
         if st.button("Start New Video", use_container_width=True):
             reset_state()
             st.rerun()
 
-    # Start burn if not already started
-    if st.session_state.burn_job_id is None:
-        if st.button("Start Burning Process", type="primary"):
-            job_id = str(uuid.uuid4())[:8]
-            st.session_state.burn_job_id = job_id
-
-            config = BurnConfig(
-                font_size=burn_settings["font_size"],
-                margin_v=burn_settings["margin_v"],
-                outline=burn_settings["outline"],
-            )
-
-            burn_subtitles_async(
-                job_id,
-                st.session_state.video_path,
-                cn_srt,
-                output_path,
-                config,
-            )
-            st.rerun()
+    # Check if already burned
+    if output_path.exists() and not st.session_state.get("burn_running"):
+        st.success(f"Output already exists: `{output_path.name}`")
+        col_use, col_redo = st.columns(2)
+        with col_use:
+            if st.button("Use Existing Output", type="primary", use_container_width=True):
+                st.session_state.step = "done"
+                st.rerun()
+        with col_redo:
+            start_burn = st.button("Re-burn", use_container_width=True)
     else:
-        # Show progress
-        status = get_burn_status(st.session_state.burn_job_id)
+        start_burn = st.button("Start Burning", type="primary")
 
-        if status["status"] == "burning":
-            progress = status.get("progress", 0)
-            st.progress(progress)
-            st.write(f"Burning... {progress*100:.1f}%")
-            time.sleep(1)
-            st.rerun()
+    if start_burn:
+        st.session_state.burn_running = True
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-        elif status["status"] == "complete":
+        config = BurnConfig(
+            font=burn_settings.get("font_family", DEFAULT_FONT),
+            font_size=burn_settings["font_size"],
+            position_bottom_pct=float(burn_settings.get("position_bottom_pct", 12.0)),
+            outline=burn_settings["outline"],
+            font_color_hex=burn_settings.get("font_color_hex", "#FFFFFF"),
+            bg_opacity=burn_settings.get("bg_opacity", 20),
+        )
+
+        status_text.write("Generating ASS subtitle file and starting ffmpeg...")
+
+        def on_progress(p):
+            progress_bar.progress(min(p, 1.0))
+            status_text.write(f"Burning subtitles into video... **{p * 100:.1f}%**")
+
+        result = burn_subtitles(
+            st.session_state.video_path,
+            cn_srt,
+            output_path,
+            config,
+            progress_callback=on_progress,
+        )
+
+        st.session_state.burn_running = False
+
+        if result.success:
+            progress_bar.progress(1.0)
+            status_text.empty()
             st.success("Burn complete!")
             st.balloons()
 
-            output_path = Path(status["output_path"])
-            st.write(f"Output saved to: `{output_path}`")
+            st.write(f"Output saved to: `{result.output_path}`")
 
-            # Download button
-            with open(output_path, "rb") as f:
+            with open(result.output_path, "rb") as f:
                 st.download_button(
                     "Download Video",
                     f,
-                    file_name=output_path.name,
+                    file_name=result.output_path.name,
                     mime="video/mp4",
                     type="primary",
                 )
 
             st.session_state.step = "done"
-
-        elif status["status"] == "failed":
-            st.error(f"Burn failed: {status.get('error', 'Unknown error')}")
-            st.session_state.burn_job_id = None
-
         else:
-            st.write(f"Status: {status['status']}")
-            time.sleep(1)
-            st.rerun()
+            status_text.empty()
+            st.error(f"Burn failed: {result.error}")
 
 # Step 5: Done
 elif st.session_state.step == "done":
@@ -546,7 +566,8 @@ elif st.session_state.step == "done":
 
     st.success("Your video is ready for Xiaohongshu!")
 
-    output_path = st.session_state.project_dir / "output_xiaohongshu.mp4"
+    project_name = st.session_state.project_dir.name
+    output_path = st.session_state.project_dir / f"{project_name} - CN.mp4"
 
     # Sidebar
     with st.sidebar:
@@ -557,10 +578,14 @@ elif st.session_state.step == "done":
 
     col1, col2 = st.columns(2)
     with col1:
+        st.subheader("Project")
+        st.write(f"`{project_name}`")
         st.subheader("Output Files")
-        st.write(f"- Video: `{output_path}`")
-        st.write(f"- Chinese SRT: `{st.session_state.srt_path.with_suffix('.cn.srt')}`")
-        st.write(f"- Bilingual SRT: `{st.session_state.srt_path.with_suffix('.bilingual.srt')}`")
+        st.write(f"- Video: `{output_path.name}`")
+        srt_dir = st.session_state.srt_path.parent
+        base = st.session_state.srt_path.stem.replace(".en", "")
+        st.write(f"- Chinese SRT: `{base}.cn.srt`")
+        st.write(f"- Bilingual SRT: `{base}.bilingual.srt`")
 
     with col2:
         if output_path.exists():
