@@ -81,11 +81,16 @@ YTDLP_PATH=/path/to/yt-dlp
 ## Run
 
 ```bash
+./run.sh
+```
+
+That's it — it auto-creates the venv if needed and launches the app at http://localhost:8501.
+
+Or manually:
+```bash
 source .venv/bin/activate
 streamlit run app.py
 ```
-
-Opens at http://localhost:8501.
 
 ## Usage
 
