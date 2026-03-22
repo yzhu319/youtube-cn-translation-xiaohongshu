@@ -160,13 +160,14 @@ Each video gets its own project folder under `data/`, auto-named from YouTube me
 ```
 data/
   Bernie vs Claude - 20260319 - h3AtWdeu_G0/
-    video.mp4                                    # downloaded video
-    video.en.srt                                 # original English subtitles
-    video.cn.srt                                 # translated Chinese subtitles
-    video.bilingual.srt                          # bilingual subtitles
-    video.cn.ass                                 # styled ASS file (generated at burn)
-    Bernie vs Claude - 20260319 - h3AtWdeu_G0 - CN.mp4  # final output
+    Bernie vs Claude - 20260319 - h3AtWdeu_G0.mp4         # downloaded video
+    Bernie vs Claude - 20260319 - h3AtWdeu_G0.en.srt      # original English subtitles
+    Bernie vs Claude - 20260319 - h3AtWdeu_G0.cn.srt      # translated Chinese subtitles
+    Bernie vs Claude - 20260319 - h3AtWdeu_G0.bilingual.srt
+    Bernie vs Claude - 20260319 - h3AtWdeu_G0.cn.ass      # styled ASS (generated at burn)
+    Bernie vs Claude - 20260319 - h3AtWdeu_G0 - CN.mp4    # final output
   AI and the Future - 20260315 - xK9f2Lp_Q3w/
+    AI and the Future - 20260315 - xK9f2Lp_Q3w.mp4
     ...
 ```
 

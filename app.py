@@ -221,14 +221,20 @@ if st.session_state.step == "input":
 
     if existing_project:
         st.success(f"Existing project found: `{existing_project.name}`")
-        srt_file = existing_project / "video.en.srt"
-        if not srt_file.exists():
-            srt_file = next(existing_project.glob("video*.srt"), None)
+        # Find video and SRT files (support both new and old naming)
+        video_file = next(existing_project.glob(f"{existing_project.name}.mp4"), None)
+        if not video_file:
+            video_file = next(existing_project.glob("video.mp4"), None)
+        srt_file = next(existing_project.glob(f"{existing_project.name}.en.srt"), None)
+        if not srt_file:
+            srt_file = next(existing_project.glob("video.en.srt"), None)
+        if not srt_file:
+            srt_file = next(existing_project.glob("*.en.srt"), None)
 
         col_use, col_redownload = st.columns(2)
         with col_use:
             if st.button("Use Existing Download", type="primary", use_container_width=True):
-                st.session_state.video_path = existing_project / "video.mp4"
+                st.session_state.video_path = video_file
                 st.session_state.srt_path = srt_file
                 st.session_state.project_dir = existing_project
                 st.session_state.step = "translate"

@@ -77,7 +77,8 @@ def find_existing_project(video_id: str) -> Path | None:
         return None
     for d in sorted(DATA_DIR.iterdir(), reverse=True):
         if d.is_dir() and video_id in d.name:
-            if (d / "video.mp4").exists():
+            # Check for any .mp4 video file (new or old naming)
+            if any(d.glob("*.mp4")):
                 return d
     return None
 
@@ -106,7 +107,9 @@ def download_video(url: str, output_name: str | None = None) -> DownloadResult:
     output_dir = DATA_DIR / project_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    video_template = str(output_dir / "video.%(ext)s")
+    # Name files after the project: "{project_name}.mp4", "{project_name}.en.srt"
+    base_name = project_name
+    video_template = str(output_dir / f"{base_name}.%(ext)s")
 
     cmd = [
         YTDLP_PATH,
@@ -125,10 +128,17 @@ def download_video(url: str, output_name: str | None = None) -> DownloadResult:
     try:
         subprocess.run(cmd, capture_output=True, text=True, check=True)
 
-        video_path = next(output_dir.glob("video.mp4"), None)
-        srt_path = next(output_dir.glob("video.en.srt"), None)
+        video_path = next(output_dir.glob(f"{base_name}.mp4"), None)
+        srt_path = next(output_dir.glob(f"{base_name}.en.srt"), None)
         if not srt_path:
-            srt_path = next(output_dir.glob("video*.srt"), None)
+            srt_path = next(output_dir.glob(f"{base_name}*.srt"), None)
+        # Fallback to old "video.*" naming for backward compat with existing projects
+        if not video_path:
+            video_path = next(output_dir.glob("video.mp4"), None)
+        if not srt_path:
+            srt_path = next(output_dir.glob("video.en.srt"), None)
+            if not srt_path:
+                srt_path = next(output_dir.glob("video*.srt"), None)
 
         if not video_path:
             return DownloadResult(False, error="Video download failed")
